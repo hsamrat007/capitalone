@@ -16,6 +16,10 @@ from gtts import gTTS
 import speech_recognition as sr
 from pydub import AudioSegment
 from context_retriever import get_pdf_context, generate_weather_context
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import datetime
+
+current_datetime = datetime.datetime.now()
 
 # --- Helper function for Gemini ---
 def image_to_base64(image):
@@ -26,27 +30,51 @@ def image_to_base64(image):
 
 # --- Main AI Logic Class ---
 class AgricultureVLM:
-    def __init__(self):
-        self.model = None
-        self.agriculture_context = """
-        You are 'Ctrl+Crop', an expert AI agricultural assistant. Your knowledge includes:
-        - Crop health, disease identification, and treatment.
-        - Pest detection and integrated pest management.
-        - Soil conditions, nutrient management, and fertilizer recommendations.
-        - Irrigation strategies and water management.
-        - Harvest timing and post-harvest techniques.
-        - Impact of weather on crops and mitigation strategies.
-        - Sustainable and organic farming practices.
-        - Details of government schemes for farmers in India.
-        Your goal is to provide practical, actionable, and cost-effective advice suitable for farmers.
-        """
-        print("✅ Agriculture VLM Initialized (will configure with API key).")
-
-    def configure_api(self, api_key):
+    def __init__(self, model_name="vikhyatk/moondream2"):
+        print("🚀 Loading Vision Language Model...")
+        
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"🖥️  Using device: {self.device}")
+        
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                model_name,
+                trust_remote_code=True,
+                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+                device_map="auto" if self.device == "cuda" else None
+            ).to(self.device)
+            
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name, 
+                trust_remote_code=True
+            )
+            
+            self.agriculture_context = """
+            You are an expert agricultural assistant with deep knowledge in:
+            - Crop health and disease identification
+            - Pest detection and integrated pest management
+            - Soil conditions and nutrient management
+            - Irrigation and water management strategies
+            - Harvest timing and post-harvest techniques
+            - Weather impact assessment and mitigation
+            - Sustainable and organic farming practices
+            - Crop rotation and companion planting
+            
+            Always provide practical, actionable advice suitable for farmers.
+            Focus on cost-effective and locally appropriate solutions.
+            """
+            
+            print("✅ Vision Language Model loaded successfully!")
+            
+        except Exception as e:
+            print(f"❌ Error loading VLM: {str(e)}")
+            raise e
+        
+    def configure_api(self, api_key="AIzaSyDA1ym7lYZyoamqIardcQx-xDhI_AaHS1Y"):
         """Configures the Gemini API key and initializes the model."""
         try:
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-1.5-flash')
+            self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
             print("✅ Gemini API configured successfully!")
             return True
         except Exception as e:
@@ -62,8 +90,27 @@ class AgricultureVLM:
             return "Error: The AI model is not configured. Please enter a valid Google API Key in the sidebar."
 
         try:
+            enhanced_prompt = f"""
+            {self.agriculture_context}
+            
+            Farmer's Question: {text_query}
+            
+            Please analyze the image and provide specific, actionable advice:
+            """
+            
+            response = self.model.answer_question(image, enhanced_prompt, self.tokenizer)
+            
+            
+        except Exception as e:
+            error_msg = f"Error processing agricultural query: {str(e)}"
+            print(f"❌ {error_msg}")
+            return error_msg
+
+
+
+        try:
             # --- 1. Context Retrieval ---
-            pdf_context = get_pdf_context(text_query, top_k=2)
+            pdf_context = get_pdf_context(text_query, top_k=5)
             weather_context = generate_weather_context(location, weather_api_key) if location and weather_api_key else ""
             
             # Google Search Context
@@ -78,7 +125,7 @@ class AgricultureVLM:
 
 
             # --- 2. Build the Enhanced Prompt ---
-            context_block = ""
+            context_block = response + f" . more context is as follows - current date time is {current_datetime}"
             if pdf_context:
                 context_block += f"--- Information from PDF Documents ---\n{pdf_context}\n\n"
             if weather_context:
@@ -93,6 +140,7 @@ class AgricultureVLM:
                 image_analysis_prompt = ""
 
             enhanced_prompt = f"""{self.agriculture_context}
+            
 
 Based on the context below, answer the farmer's question.
 {context_block}
@@ -102,16 +150,16 @@ Based on the context below, answer the farmer's question.
 **Your Analysis:**
 {image_analysis_prompt}provide a comprehensive analysis and specific, actionable advice.
 """
-
+            print(enhanced_prompt)
             # --- 3. Generate Response using Gemini ---
             with st.spinner("🤖 Ctrl+Crop is thinking..."):
                 if image:
                     # Multimodal query (Image + Text)
                     image_part = {"mime_type": "image/jpeg", "data": base64.b64encode(image.getvalue()).decode("utf-8")}
-                    response = self.model.generate_content([enhanced_prompt, image_part])
+                    response = self.gemini_model.generate_content([enhanced_prompt, image_part])
                 else:
                     # Text-only query
-                    response = self.model.generate_content(enhanced_prompt)
+                    response = self.gemini_model.generate_content(enhanced_prompt)
 
             return response.text
 
@@ -196,23 +244,20 @@ vlm, tts, asr = load_systems()
 
 def main():
     st.markdown('<h1 class="main-header">🌾 Ctrl+Crop AI Assistant</h1>', unsafe_allow_html=True)
+    
 
     # --- Sidebar ---
     with st.sidebar:
-        st.markdown("### 🔑 API Configuration")
-        google_api_key = st.text_input("Enter your Google API Key", type="password")
-        if st.button("Configure API Key"):
-            if google_api_key:
-                st.session_state.api_key_configured = vlm.configure_api(google_api_key)
-                if st.session_state.api_key_configured:
-                    st.success("API Key configured!")
-            else:
-                st.warning("Please enter an API key.")
+        
 
         st.markdown("---")
         st.markdown("### 📍 Location & Weather")
         location_name = st.text_input("Location (village/town):")
-        tomorrow_api_key = st.text_input("Tomorrow.io API Key (optional)", type="password")
+        tomorrow_api_key = "579b464db66ec23bdd00000176bb599d213c47c4783456e7c1c53b83"
+
+        st.session_state.api_key_configured = vlm.configure_api()
+        if st.session_state.api_key_configured:
+            st.success("API Key configured!")
         
         st.markdown("---")
         if st.button("🗑️ Clear Conversation"):
@@ -252,9 +297,7 @@ def main():
         generate_audio = st.checkbox("Generate audio response", value=True)
 
         if st.button("🔍 Analyze", type="primary"):
-            if not st.session_state.api_key_configured:
-                st.error("Please configure your Google API Key in the sidebar first.")
-            elif not text_query.strip():
+            if not text_query.strip():
                 st.error("Please enter or record a question.")
             else:
                 response = vlm.process_query(
