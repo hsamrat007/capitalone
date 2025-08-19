@@ -1,0 +1,15 @@
+streamlit
+audio_recorder_streamlit
+pdfplumber
+sentence-transformers
+torch
+scikit-learn
+torchvision
+transformers
+gtts
+opencv-python
+pydub
+google-generativeai
+SpeechRecognition
+pygame
+googlesearch-python
