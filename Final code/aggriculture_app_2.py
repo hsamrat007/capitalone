@@ -18,8 +18,30 @@ from pydub import AudioSegment
 from context_retriever import get_pdf_context, generate_weather_context
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import datetime
-
+from googlesearch import search
 import re
+
+
+import requests
+from bs4 import BeautifulSoup
+
+def fetch_page_snippet(url, max_chars=500):
+    """Fetch title + short snippet of a page for context."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Get title
+        title = soup.title.string.strip() if soup.title else "No title"
+
+        # Extract text (first few paragraphs)
+        paragraphs = " ".join([p.get_text() for p in soup.find_all("p")[:3]])
+        snippet = paragraphs[:max_chars].strip()
+
+        return f"🔗 {title} ({url})\n{snippet}\n"
+    except Exception as e:
+        return f"🔗 {url} (content unavailable: {e})\n"
 
 
 def format_pdf_insights(text):
@@ -134,6 +156,17 @@ Please provide a clear, concise, and farmer-friendly summary of the above inform
             if weather_context:
                 context_block += f"--- Local Weather Forecast ---\n{weather_context}\n\n"
 
+
+            try:
+                search_results = []
+                for url in search(combined_query, num_results=3, lang="en"):
+                    snippet = fetch_page_snippet(url)
+                    search_results.append(snippet)
+
+                if search_results:
+                    context_block += "\n--- Online References ---\n" + "\n".join(search_results)
+            except Exception as e:
+                print(f"⚠️ Google search failed: {e}")
             # 🔹 Gemini VLM for image analysis (optional, not primary)
             vlm_response = ""
             if image:
@@ -142,6 +175,12 @@ Please provide a clear, concise, and farmer-friendly summary of the above inform
                 except Exception as e:
                     print(f"❌ VLM error: {e}")
                     vlm_response = ""
+            
+            try:
+                vlm_response += self.model.answer_question( text_query, self.tokenizer)
+            except Exception as e:
+                print(f"❌ VLM error: {e}")
+                vlm_response += ""
 
             if vlm_response:
                 context_block += f"--- Image Analysis (VLM) ---\n{vlm_response}\n\n"
