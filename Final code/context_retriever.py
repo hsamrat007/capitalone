@@ -107,20 +107,30 @@ def _load_index(index_path=INDEX_PATH):
     _INDEX_DATA = data
     return _INDEX_DATA
 
+import re
+
 def get_pdf_context(query, top_k=3, index_path=INDEX_PATH):
-    """Return top_k relevant PDF chunks (concatenated) for the query."""
+    """Return top_k relevant PDF chunks (cleaned, no source refs) for the query."""
     data = _load_index(index_path)
     q_emb = EMBED_MODEL.encode([query], convert_to_numpy=True)
+
     # ensure top_k <= n_samples
     n_samples = data["embeddings"].shape[0]
     k = min(top_k, n_samples)
+
     distances, indices = data["nn"].kneighbors(q_emb, n_neighbors=k)
     pieces = []
+
     for idx in indices[0]:
-        meta = data["metadatas"][idx]
         chunk_text = data["chunks"][idx]
-        pieces.append(f"Source: {meta.get('source','?')} (page {meta.get('page','?')}):\n{chunk_text}")
-    return "\n\n".join(pieces)
+
+        # 🔹 Remove extra whitespace/newlines
+        text = re.sub(r"\s+", " ", chunk_text).strip()
+
+        if text:
+            pieces.append(f"• {text}")
+
+    return "\n".join(pieces) if pieces else None
 
 # ======= Geocoding & Tomorrow.io weather =======
 def nominatim_geocode(location_query, sleep_between=1.0):
@@ -139,47 +149,87 @@ def nominatim_geocode(location_query, sleep_between=1.0):
     time.sleep(sleep_between)
     return lat, lon, name
 
-def get_weather_context_from_tomorrow(latitude, longitude, api_key, days=3):
-    url = f"https://api.tomorrow.io/v4/timelines"
-    params = {
-        "location": f"{latitude},{longitude}",
-        "timesteps": "1d",
-        "units":"metric",
-        "fields": ["temperatureAvg","precipitationSum","windSpeed","humidity"],
-        "apikey": api_key
-    }
-    # tomorrow.io may expect a JSON body; some accounts use different endpoints. Check the API docs if you get 400.
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        # fallback: return raw status
-        return None
-    data = resp.json()
-    # Drip a concise summary (next `days`)
-    timelines = data.get("data", {}).get("timelines", [])
-    if not timelines:
-        return None
-    # Find daily timeline (if available)
-    daily = None
-    for t in timelines:
-        if t.get("timestep","").lower().startswith("1d"):
-            daily = t
-            break
-    if not daily:
-        daily = timelines[0]
-    entries = daily.get("entries", [])[:days]
-    summary_lines = []
-    for e in entries:
-        dt = e.get("time","")[:10]
-        vals = e.get("values", {})
-        summary_lines.append(f"{dt}: temp_avg={vals.get('temperatureAvg','?')}°C, rain={vals.get('precipitationSum','?')}mm, wind={vals.get('windSpeed','?')} m/s")
-    return "Weather forecast summary:\n" + "\n".join(summary_lines)
+# def get_weather_context_from_tomorrow(latitude, longitude, api_key, days=3):
+#     url = f"https://api.tomorrow.io/v4/timelines"
+#     params = {
+#         "location": f"{latitude},{longitude}",
+#         "timesteps": "1d",
+#         "units":"metric",
+#         "fields": ["temperatureAvg","precipitationSum","windSpeed","humidity"],
+#         "apikey": api_key
+#     }
+#     # tomorrow.io may expect a JSON body; some accounts use different endpoints. Check the API docs if you get 400.
+#     resp = requests.get(url, params=params)
+#     if resp.status_code != 200:
+#         # fallback: return raw status
+#         return None
+#     data = resp.json()
+#     # Drip a concise summary (next `days`)
+#     timelines = data.get("data", {}).get("timelines", [])
+#     if not timelines:
+#         return None
+#     # Find daily timeline (if available)
+#     daily = None
+#     for t in timelines:
+#         if t.get("timestep","").lower().startswith("1d"):
+#             daily = t
+#             break
+#     if not daily:
+#         daily = timelines[0]
+#     entries = daily.get("entries", [])[:days]
+#     summary_lines = []
+#     for e in entries:
+#         dt = e.get("time","")[:10]
+#         vals = e.get("values", {})
+#         summary_lines.append(f"{dt}: temp_avg={vals.get('temperatureAvg','?')}°C, rain={vals.get('precipitationSum','?')}mm, wind={vals.get('windSpeed','?')} m/s")
+#     return "Weather forecast summary:\n" + "\n".join(summary_lines)
 
-def generate_weather_context(location_query, tomorrow_api_key):
+# def generate_weather_context(location_query, tomorrow_api_key):
+#     geo = nominatim_geocode(location_query)
+#     if not geo:
+#         return None
+#     lat, lon, resolved_name = geo
+#     weather = get_weather_context_from_tomorrow(lat, lon, tomorrow_api_key)
+#     if not weather:
+#         return f"Resolved location: {resolved_name} ({lat},{lon}). Weather lookup failed or returned no data."
+#     return f"Resolved location: {resolved_name} ({lat},{lon}).\n\n{weather}"
+
+def generate_weather_context(location_query, _api_key=None):
     geo = nominatim_geocode(location_query)
     if not geo:
         return None
     lat, lon, resolved_name = geo
-    weather = get_weather_context_from_tomorrow(lat, lon, tomorrow_api_key)
+    weather = get_weather_context_open_meteo(lat, lon)
     if not weather:
         return f"Resolved location: {resolved_name} ({lat},{lon}). Weather lookup failed or returned no data."
     return f"Resolved location: {resolved_name} ({lat},{lon}).\n\n{weather}"
+
+
+def get_weather_context_open_meteo(latitude, longitude, days=3):
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+        "timezone": "auto",
+        "forecast_days": days
+    }
+    resp = requests.get(url, params=params)
+    if resp.status_code != 200:
+        return None
+    data = resp.json()
+
+    daily = data.get("daily", {})
+    dates = daily.get("time", [])
+    temps_max = daily.get("temperature_2m_max", [])
+    temps_min = daily.get("temperature_2m_min", [])
+    precipitation = daily.get("precipitation_sum", [])
+    weather_codes = daily.get("weathercode", [])
+
+    summary_lines = []
+    for i in range(len(dates)):
+        summary_lines.append(
+            f"{dates[i]}: Max {temps_max[i]}°C, Min {temps_min[i]}°C, Rain {precipitation[i]}mm, Weather Code {weather_codes[i]}"
+        )
+
+    return "Weather forecast summary (Open-Meteo):\n" + "\n".join(summary_lines)
